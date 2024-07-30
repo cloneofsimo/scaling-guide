@@ -1,9 +1,9 @@
-import math
+from collections import defaultdict
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from collections import defaultdict
+
 
 class Rotary(nn.Module):
     def __init__(self, dim, base=10000):
@@ -50,6 +50,7 @@ class CausalSelfAttention(nn.Module):
         assert self.n_embd % self.n_head == 0
         self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+
         self.rotary = Rotary(self.head_dim)
 
     def forward(self, x):
@@ -88,7 +89,7 @@ class Block(nn.Module):
         super().__init__()
         self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
-        
+
     def forward(self, x):
         x = x + self.attn(rmsnorm(x))
         x = x + self.mlp(rmsnorm(x))
@@ -123,14 +124,13 @@ class GPT(nn.Module):
         # init lm_head with zeros
         self.lm_head.weight.data.fill_(0)
 
-        # init all weights with fan_in / 1024 * base_std
-        for n, p in self.named_parameters():
-            skip_list = ['wte', 'lm_head']
-            if not any([s in n for s in skip_list]):
-                fan_in = p.shape[1]
+        # # init all weights with fan_in / 1024 * base_std
+        # for n, p in self.named_parameters():
+        #     skip_list = ["wte", "lm_head"]
+        #     if not any([s in n for s in skip_list]):
+        #         fan_in = p.shape[1]
 
-                p.data.normal_(mean=0.0, std=config.base_std * (1024 / fan_in) ** 0.5)
-
+        #         p.data.normal_(mean=0.0, std=config.base_std * (1024 / fan_in) ** 0.5)
 
     def forward(self, idx, targets=None, return_logits=True):
         b, t = idx.size()
@@ -155,7 +155,9 @@ class GPT(nn.Module):
 
         return logits, loss
 
-    def configure_classic_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def configure_classic_optimizers(
+        self, weight_decay, learning_rate, betas, device_type
+    ):
         optimizer = torch.optim.AdamW(
             self.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=betas
         )
@@ -167,33 +169,37 @@ class GPT(nn.Module):
         optimizer_grouped_parameters = []
         final_optimizer_settings = {}
 
-        param_groups = defaultdict(lambda: {"params": [], "weight_decay": None, "lr": None})
+        param_groups = defaultdict(
+            lambda: {"params": [], "weight_decay": None, "lr": None}
+        )
 
         for n, p in self.named_parameters():
             if p.requires_grad:
-                
+
                 # Define learning rate for specific types of params
                 if any(ndnl in n for ndnl in no_decay_name_list):
-                    lr_value = learning_rate * 0.033
-                    weight_decay_value = 0.0
+                    lr_value = learning_rate * 0.1
+                    per_layer_weight_decay_value = 0.0
                 else:
                     hidden_dim = p.shape[-1]
                     lr_value = learning_rate * (32 / hidden_dim)
-                    weight_decay_value = 0.1 * hidden_dim / 1024 # weight decay 0.1 (SP: 1024)
-                
+                    per_layer_weight_decay_value = (
+                        weight_decay * hidden_dim / 1024
+                    )  # weight decay 0.1 (SP: 1024)
+
                 # in the case of embedding layer, we use higher lr.
                 if "wte" in n:
                     lr_value = learning_rate * 0.1
-                    weight_decay_value = 0.0
+                    per_layer_weight_decay_value = 0.0
 
-                group_key = (lr_value, weight_decay_value)
+                group_key = (lr_value, per_layer_weight_decay_value)
                 param_groups[group_key]["params"].append(p)
-                param_groups[group_key]["weight_decay"] = weight_decay_value
+                param_groups[group_key]["weight_decay"] = per_layer_weight_decay_value
                 param_groups[group_key]["lr"] = lr_value
 
                 final_optimizer_settings[n] = {
                     "lr": lr_value,
-                    "wd": weight_decay_value,
+                    "wd": per_layer_weight_decay_value,
                     "shape": str(list(p.shape)),
                 }
 

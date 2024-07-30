@@ -1,31 +1,32 @@
 import glob
 import os
+import re
 import time
 import uuid
 
 import click
 import numpy as np
+import pandas as pd
+import plotly.express as px
 import torch
-import torch.nn as nn
 import torch._inductor.config as config
 import torch.distributed as dist
-import wandb
+import torch.nn as nn
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
-torch.set_float32_matmul_precision('high')
+
+import wandb
+
+torch.set_float32_matmul_precision("high")
+
+from collections import defaultdict
+
+import numpy as np
+import plotly.graph_objects as go
+import torch
 
 from model import GPT, GPTConfig
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from collections import defaultdict
-import html
-
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from collections import defaultdict
-import torch
-import numpy as np
 
 def _peek_data_shard(filename):
     # only reads the header, returns header data
@@ -111,7 +112,6 @@ class DistributedDataLoader:
         return x.cuda(), y.cuda()
 
 
-
 def print0(*args, **kwargs):
     # modified print that only prints from the master process
     # if this is not a distributed run, it's just a print
@@ -134,36 +134,16 @@ def warmup_cooldown_lr(
         decay_ratio = (num_iterations - step) / warmdown_iters
         return learning_rate * decay_ratio
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from collections import defaultdict
-import torch
-import numpy as np
 
 def get_activation_stats(model):
     activation_stats = defaultdict(list)
-    
+
     def hook_fn(module, input, output):
         if isinstance(output, torch.Tensor):
-            abs_output = output.abs().detach()
-            stats = torch.stack([
-                abs_output.mean(),
-                abs_output.std(),
-                abs_output.min(),
-                abs_output.max()
-            ]).cpu().numpy()
-            activation_stats[module.name].append(stats)
-        elif isinstance(output, tuple):
-            for i, tensor in enumerate(output):
-                if isinstance(tensor, torch.Tensor):
-                    abs_output = tensor.abs().detach()
-                    stats = torch.stack([
-                        abs_output.mean(),
-                        abs_output.std(),
-                        abs_output.min(),
-                        abs_output.max()
-                    ]).cpu().numpy()
-                    activation_stats[f"{module.name}_output{i}"].append(stats)
+            abs_output = output.abs().detach().view(-1)[:10].cpu().numpy()
+            activation_stats[module.name].append(abs_output)
+        else:
+            raise ValueError("Output is not a tensor")
 
     hooks = []
     for name, module in model.named_modules():
@@ -173,52 +153,142 @@ def get_activation_stats(model):
 
     return activation_stats, hooks
 
+
 def remove_hooks(hooks):
     for hook in hooks:
         hook.remove()
 
+
 def log_plot(activation_stats, step):
     fig = go.Figure()
-    
+
     sorted_modules = sorted(activation_stats.keys())
-    
+
     for i, module_name in enumerate(sorted_modules):
         layer_activations = np.concatenate(activation_stats[module_name])
-        
-        fig.add_trace(go.Box(
-            y=layer_activations,
-            name=module_name,
-            boxpoints='outliers',
-            jitter=0.3,
-            whiskerwidth=0.2,
-            marker_size=2,
-            line_width=1
-        ))
+        print(f"Layer {module_name} has {len(layer_activations)} activations")
+        print(layer_activations)
+        fig.add_trace(
+            go.Box(
+                y=layer_activations,
+                name=module_name,
+                boxpoints="outliers",
+                jitter=0.3,
+                marker_size=2,
+            )
+        )
 
     fig.update_layout(
-        title=f'Per-Layer Activation Distribution (Step {step})',
-        yaxis_title='Absolute Activation Value',
-        xaxis_title='Layers',
-        boxmode='group',
+        title=f"Per-Layer Activation Distribution (Step {step})",
+        yaxis_title="Absolute Activation Value",
+        xaxis_title="Layers",
+        boxmode="group",
         showlegend=False,
-        hovermode='closest'
+        hovermode="closest",
     )
 
     # Update x-axis to show module names
     fig.update_xaxes(
-        ticktext=sorted_modules,
-        tickvals=list(range(len(sorted_modules))),
-        tickangle=45
+        ticktext=sorted_modules, tickvals=list(range(len(sorted_modules))), tickangle=45
     )
 
     # Save the plot as HTML and log it to wandb
-    html_file = f'/tmp/activation_stats_step_{step}.html'
+    html_file = f"/tmp/activation_stats_step_{step}.html"
     fig.write_html(html_file)
-    
-    with open(html_file, 'r') as f:
+
+    with open(html_file, "r") as f:
         html_content = f.read()
-    
-    wandb.log({"Activation Distribution": wandb.Html(html_content)}, step=step)
+
+    wandb.log({"Activation Distribution": wandb.Html(html_content)})
+
+
+def log_weight_plot(model_cur_sd, model_prev_sd, step):
+    # Initialize a new run
+
+    # Create lists to store data for the plot
+    layer_names = []
+    std_devs = []
+    l1_norms = []
+    param_counts = []
+    colors = []
+    markers = []
+
+    # Iterate over the parameters and compute necessary metrics
+    for name, param in model_cur_sd.items():
+        if name in model_prev_sd:
+            prev_param = model_prev_sd[name]
+            std_dev = param.std().item()
+            l1_norm = torch.abs(param - prev_param).mean().item()
+            param_count = param.numel()
+
+            # Determine color based on the criteria using regex
+            layer_match = re.match(r".*\.h\.(\d+)(?:\..*)?$", name)
+
+            if layer_match:
+                layer_num = int(layer_match.group(1))
+                colors.append(layer_num)
+            else:
+                colors.append(-1)
+
+            # Determine marker type
+            if param.ndim == 1:
+                markers.append("x")
+            else:
+                markers.append("circle")
+
+            layer_names.append(name)
+            std_devs.append(std_dev)
+            l1_norms.append(np.log1p(l1_norm))  # log(1 + x) transformation
+            param_counts.append(np.log(param_count))
+
+    # Create a DataFrame for the plot
+    df = pd.DataFrame(
+        {
+            "Layer Name": layer_names,
+            "Standard Deviation": std_devs,
+            "L1 Norm of Changes (log scale)": l1_norms,
+            "Parameter Count (log)": param_counts,
+            "Color": colors,
+            "Marker": markers,
+        }
+    )
+
+    # Determine the number of layers
+    max_layer_num = df[df["Color"] != -1]["Color"].max()
+
+    # Create a color scale for the layers (yellow to red)
+    color_scale = px.colors.sequential.YlOrRd
+    color_discrete_map = {
+        i: color_scale[int(i * (len(color_scale) - 1) / max_layer_num)]
+        for i in range(int(max_layer_num) + 1)
+    }
+    color_discrete_map[-1] = "blue"  # Blue for non-layer parameters
+
+    # Create Plotly figure
+    fig = px.scatter(
+        df,
+        x="Standard Deviation",
+        y="L1 Norm of Changes (log scale)",
+        size="Parameter Count (log)",
+        color="Color",
+        hover_name="Layer Name",
+        title=f"Model Weight Distribution and Changes, step {step}",
+        symbol="Marker",
+        color_discrete_map=color_discrete_map,
+        opacity=0.7,
+    )
+
+    #
+    path_to_plotly_html = "/tmp/weight_distribution_changes.html"
+    fig.write_html(path_to_plotly_html, auto_play=False)
+    wandb.log(
+        {
+            "Weight Distribution and Changes": wandb.Html(
+                open(path_to_plotly_html).read()
+            )
+        }
+    )
+
 
 @click.command()
 @click.option(
@@ -232,21 +302,24 @@ def log_plot(activation_stats, step):
 @click.option(
     "--output_dir", default="", help="Output directory for logs and checkpoints"
 )
-@click.option(
-    "--batch_size", default=4, help="Batch size, in units of #batch dimensions"
-)
-@click.option("--sequence_length", default=64, help="Sequence length")
-@click.option("--num_iterations", default=10, help="Number of iterations to run")
-@click.option("--learning_rate", default=1e-4, help="Learning rate")
-@click.option("--warmup_iters", default=0, help="Learning rate warmup iterations")
-@click.option("--warmdown_iters", default=0, help="Learning rate warmdown iterations")
-@click.option("--weight_decay", default=0.0, help="Weight decay")
 @click.option("--val_loss_every", default=0, help="Evaluate val loss every N steps")
 @click.option("--val_max_steps", default=20, help="Number of batches of val to average")
 @click.option("--save_every", default=5000, help="Save checkpoint every N steps")
 @click.option("--wandb_project", default="gpt-training", help="W&B project name")
 @click.option("--wandb_run_name", default=None, help="W&B run name")
-@click.option("--vocab_size", default=50257, help="Vocabulary size")
+@click.option(
+    "--batch_size", default=4, help="Batch size, in units of #batch dimensions"
+)
+@click.option("--sequence_length", default=64, help="Sequence length")
+@click.option("--num_iterations", default=10, help="Number of iterations to run")
+@click.option(
+    "--learning_rate", default=1e-4, help="Learning rate"
+)  # optimizer related
+@click.option("--warmup_iters", default=0, help="Learning rate warmup iterations")
+@click.option("--warmdown_iters", default=0, help="Learning rate warmdown iterations")
+@click.option("--weight_decay", default=0.0, help="Weight decay")
+@click.option("--gradient_clip", default=1.0, help="Gradient clipping threshold")
+@click.option("--vocab_size", default=50257, help="Vocabulary size")  # model related
 @click.option("--n_layer", default=12, help="Number of layers")
 @click.option("--n_head", default=12, help="Number of attention heads")
 @click.option("--n_embd", default=768, help="Embedding dimension")
@@ -268,6 +341,7 @@ def main(
     warmup_iters,
     warmdown_iters,
     weight_decay,
+    gradient_clip,
     val_loss_every,
     val_max_steps,
     save_every,
@@ -297,25 +371,28 @@ def main(
         if wandb_run_name is None:
             wandb_run_name = f"bs{batch_size}_seq{sequence_length}_lr{learning_rate}_wd{weight_decay}"
 
-        wandb.init(project=wandb_project, name=wandb_run_name, config={
-            "batch_size": batch_size,
-            "sequence_length": sequence_length,
-            "num_iterations": num_iterations,
-            "learning_rate": learning_rate,
-            "warmup_iters": warmup_iters,
-            "warmdown_iters": warmdown_iters,
-            "weight_decay": weight_decay,
-            "val_loss_every": val_loss_every,
-            "val_max_steps": val_max_steps,
-            "save_every": save_every,
-            "vocab_size": vocab_size,
-            "n_layer": n_layer,
-            "n_head": n_head,
-            "n_embd": n_embd,
-            "ffn_dim": ffn_dim,
-            "lr_scheduler": lr_scheduler,
-        })
-        
+        wandb.init(
+            project=wandb_project,
+            name=wandb_run_name,
+            config={
+                "batch_size": batch_size,
+                "sequence_length": sequence_length,
+                "num_iterations": num_iterations,
+                "learning_rate": learning_rate,
+                "warmup_iters": warmup_iters,
+                "warmdown_iters": warmdown_iters,
+                "weight_decay": weight_decay,
+                "val_loss_every": val_loss_every,
+                "val_max_steps": val_max_steps,
+                "save_every": save_every,
+                "vocab_size": vocab_size,
+                "n_layer": n_layer,
+                "n_head": n_head,
+                "n_embd": n_embd,
+                "ffn_dim": ffn_dim,
+                "lr_scheduler": lr_scheduler,
+            },
+        )
 
     # Error checking and convenience variables
     B, T = batch_size, sequence_length
@@ -344,7 +421,7 @@ def main(
     if hasattr(config, "coordinate_descent_tuning"):
         config.coordinate_descent_tuning = True
     print0("compiling the model...")
-    #model = torch.compile(model)
+    # model = torch.compile(model)
     print0("done compiling the model")
 
     # Wrap model in DDP
@@ -377,6 +454,10 @@ def main(
         with open(logfile, "w") as f:
             pass
 
+    prv_sd = {}
+    for name, param in model.named_parameters():
+        prv_sd[name] = param.data.clone().cpu()
+
     # Main training loop
     timings = []
     for step in range(num_iterations + 1):
@@ -384,12 +465,23 @@ def main(
         last_step = step == num_iterations
 
         # Validation
-        if val_loss_every > 0 and (step % val_loss_every == 0 or last_step) and val_loader is not None:
+        if (
+            val_loss_every > 0
+            and (step % val_loss_every == 0 or last_step)
+            and val_loader is not None
+        ):
+
+            cur_sd = {}
+            for name, param in model.named_parameters():
+                cur_sd[name] = param.data.clone().cpu()
+
             model.eval()
             val_loader.reset()
             with torch.no_grad():
                 val_loss = 0.0
-                activation_stats, hooks = get_activation_stats(model.module)  # Note: use model.module to access the base model in DDP
+                activation_stats, hooks = get_activation_stats(
+                    model.module
+                )  # Note: use model.module to access the base model in DDP
                 for _ in range(val_max_steps):
                     x_val, y_val = val_loader.next_batch()
                     _, loss = model(x_val, y_val, return_logits=False)
@@ -399,11 +491,12 @@ def main(
                 val_loss /= val_max_steps
             print0(f"val loss {val_loss}")
             if master_process:
-                wandb.log({"val_loss": val_loss}, step=step)
+                wandb.log({"val_loss": val_loss})
                 log_plot(activation_stats, step)
-                if logfile is not None:
-                    with open(logfile, "a") as f:
-                        f.write(f"s:{step} tel:{val_loss}\n")
+                log_weight_plot(cur_sd, prv_sd, step)
+                for name, param in model.named_parameters():
+                    prv_sd[name] = param.data.clone().cpu()
+
         # Training
         model.train()
         with ctx:
@@ -411,6 +504,9 @@ def main(
             train_loss = loss.detach()
         x, y = train_loader.next_batch()
         loss.backward()
+
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+
         lr = get_lr(step)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
@@ -431,8 +527,8 @@ def main(
                     "train_loss": lossf,
                     "learning_rate": lr,
                     "tokens_per_second": tokens_per_second,
+                    "grad_norm": grad_norm,
                 },
-                step=step,
             )
             if logfile is not None:
                 with open(logfile, "a") as f:

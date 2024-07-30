@@ -2,6 +2,16 @@
 
 WIP
 
+# Feature
+
+Activation Tracking:
+
+![alt text](contents/activation.png)
+
+Weight Update Tracking:
+
+![alt text](contents/weight_shift.png)
+
 # Scope:
 
 * Kaplan vs Chinchilla
@@ -14,3 +24,4 @@ WIP
 * data dependent lr tranfer
 * embedding lr transfer
 * u-muP
+
