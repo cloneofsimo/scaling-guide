@@ -102,6 +102,9 @@ class GPTConfig:
         self.n_head = n_head
         self.n_embd = n_embd
 
+        self.emb_std = 0.02
+        self.base_std = 0.02
+
 
 class GPT(nn.Module):
     def __init__(self, config):
@@ -115,6 +118,19 @@ class GPT(nn.Module):
             )
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # init wte with emb_std
+        self.transformer.wte.weight.data.normal_(mean=0.0, std=config.emb_std)
+        # init lm_head with zeros
+        self.lm_head.weight.data.fill_(0)
+
+        # init all weights with fan_in / 1024 * base_std
+        for n, p in self.named_parameters():
+            skip_list = ['wte', 'lm_head']
+            if not any([s in n for s in skip_list]):
+                fan_in = p.shape[1]
+
+                p.data.normal_(mean=0.0, std=config.base_std * (1024 / fan_in) ** 0.5)
+
 
     def forward(self, idx, targets=None, return_logits=True):
         b, t = idx.size()
