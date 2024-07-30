@@ -25,3 +25,7 @@ Weight Update Tracking:
 * embedding lr transfer
 * u-muP
 
+# Shoutout
+
+Thanks to [Fal.ai](https://fal.ai/) for providing compute to run these experiments.
+
