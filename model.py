@@ -97,14 +97,22 @@ class Block(nn.Module):
 
 
 class GPTConfig:
-    def __init__(self, vocab_size=50257, n_layer=12, n_head=12, n_embd=768):
+    def __init__(
+        self,
+        vocab_size=50257,
+        n_layer=12,
+        n_head=12,
+        n_embd=768,
+        gpt_linear_init_std=0.02,
+        gpt_embed_init_std=0.02,
+    ):
         self.vocab_size = vocab_size
         self.n_layer = n_layer
         self.n_head = n_head
         self.n_embd = n_embd
 
-        self.emb_std = 0.02
-        self.base_std = 0.02
+        self.emb_std = gpt_embed_init_std
+        self.base_std = gpt_linear_init_std
 
 
 class GPT(nn.Module):
@@ -190,7 +198,7 @@ class GPT(nn.Module):
                 # in the case of embedding layer, we use higher lr.
                 if "wte" in n:
                     lr_value = learning_rate * 0.1
-                    per_layer_weight_decay_value = 0.0
+                    per_layer_weight_decay_value = 0.1
 
                 group_key = (lr_value, per_layer_weight_decay_value)
                 param_groups[group_key]["params"].append(p)
