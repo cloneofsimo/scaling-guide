@@ -13,7 +13,7 @@ WARMDOWN_ITERS=2048
 
 # Arrays for sweeping
 LEARNING_RATES=(0.01 0.0031 0.001 0.0031)
-GRAD_ACCUM_SIZES=(1 2 4 8)
+GRAD_ACCUM_SIZES=(2 4 8 16)
 
 # Loop over learning rates and gradient accumulation sizes
 for lr in "${LEARNING_RATES[@]}"; do

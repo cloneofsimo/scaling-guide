@@ -3,6 +3,7 @@ torchrun --standalone --nproc_per_node=8 run.py \
     --input_val_bin "data/fineweb10B/fineweb_val_*.bin" \
     --output_dir log_100m \
     --batch_size 32 \
+    --gradient_accumulation_steps 2 \
     --sequence_length 1024 \
     --val_loss_every 128 \
     --num_iterations 9536 \

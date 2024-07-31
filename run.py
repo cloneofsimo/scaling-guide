@@ -1,3 +1,24 @@
+import os
+import time
+import uuid
+
+import click
+import numpy as np
+import torch
+import torch._inductor.config as config
+import torch.distributed as dist
+from torch.distributed import destroy_process_group, init_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+import wandb
+
+torch.set_float32_matmul_precision("high")
+
+
+import numpy as np
+import torch
+
+from model import GPT, GPTConfig
 from utils import *
 
 
@@ -165,10 +186,18 @@ def main(
     raw_model = model.module
 
     # Initialize optimizer
+    batch_ratio_4M = (
+        B * T * gradient_accumulation_steps * ddp_world_size
+    ) / 4e6  # effective batch size relative to 4M which people use a lot.
+
+    print0(
+        f"batch_ratio_4M: {batch_ratio_4M}, your betas will be {(1 - batch_ratio_4M * (1 - 0.9), 1 - batch_ratio_4M * (1 - 0.95))}"
+    )
+
     optimizer = raw_model.configure_optimizers(
         weight_decay=weight_decay,
         learning_rate=learning_rate,
-        betas=(0.9, 0.95),
+        betas=(1 - batch_ratio_4M * (1 - 0.9), 1 - batch_ratio_4M * (1 - 0.95)),
         device_type=device,
     )
 
