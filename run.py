@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import uuid
@@ -5,7 +6,6 @@ import uuid
 import click
 import numpy as np
 import torch
-import torch._inductor.config as config
 import torch.distributed as dist
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -75,6 +75,7 @@ from utils import *
 @click.option("--warmdown_iters", default=0, help="Learning rate warmdown iterations")
 @click.option("--warmup_iters", default=0, help="Learning rate warmup iterations")
 @click.option("--weight_decay", default=0.0, help="Weight decay")
+@click.option("--wandb_tags", default="", help="Comma-separated list of tags")
 def main(
     batch_size,
     ffn_dim,
@@ -101,6 +102,7 @@ def main(
     warmdown_iters,
     warmup_iters,
     weight_decay,
+    wandb_tags,
 ):
 
     # Set up DDP
@@ -144,6 +146,7 @@ def main(
                 "gpt_embed_init_std": gpt_embed_init_std,
                 "gpt_linear_init_std": gpt_linear_init_std,
             },
+            tags=wandb_tags.split(","),
         )
 
     # Error checking and convenience variables
@@ -163,8 +166,7 @@ def main(
     x, y = train_loader.next_batch()
 
     # Initialize the model
-    if ffn_dim is None:
-        ffn_dim = 4 * n_embd
+
     model_config = GPTConfig(
         vocab_size=vocab_size,
         n_layer=n_layer,
@@ -175,8 +177,7 @@ def main(
     )
     model = GPT(model_config)
     model = model.train().cuda()
-    if hasattr(config, "coordinate_descent_tuning"):
-        config.coordinate_descent_tuning = True
+
     print0("compiling the model...")
     # model = torch.compile(model)
     print0("done compiling the model")
@@ -186,18 +187,18 @@ def main(
     raw_model = model.module
 
     # Initialize optimizer
-    batch_ratio_4M = (
+    batch_ratio_16M = (
         B * T * gradient_accumulation_steps * ddp_world_size
-    ) / 4e6  # effective batch size relative to 4M which people use a lot.
+    ) / 1.6e7  # effective batch size relative to 16M which people use a lot.
 
     print0(
-        f"batch_ratio_4M: {batch_ratio_4M}, your betas will be {(1 - batch_ratio_4M * (1 - 0.9), 1 - batch_ratio_4M * (1 - 0.95))}"
+        f"batch_ratio_16M: {batch_ratio_16M}, your betas will be {(1 - batch_ratio_16M * (1 - 0.9), 1 - batch_ratio_16M * (1 - 0.95))}"
     )
 
-    optimizer = raw_model.configure_optimizers(
+    optimizer, optimizer_settings = raw_model.configure_optimizers(
         weight_decay=weight_decay,
         learning_rate=learning_rate,
-        betas=(1 - batch_ratio_4M * (1 - 0.9), 1 - batch_ratio_4M * (1 - 0.95)),
+        betas=(1 - batch_ratio_16M * (1 - 0.9), 1 - batch_ratio_16M * (1 - 0.95)),
         device_type=device,
     )
 
@@ -216,8 +217,9 @@ def main(
     if master_process and output_dir:
         os.makedirs(output_dir, exist_ok=True)
         logfile = os.path.join(output_dir, f"{run_id}.log")
-        with open(logfile, "w") as f:
-            pass
+        # dump optimizer config dict as json
+        with open(os.path.join(output_dir, f"{run_id}_optimizer.json"), "w") as f:
+            json.dump(optimizer_settings, f)
 
     prv_sd = {}
     for name, param in model.named_parameters():
@@ -256,7 +258,7 @@ def main(
                 val_loss /= val_max_steps
             print0(f"val loss {val_loss}")
             if master_process:
-                wandb.log({"val_loss": val_loss})
+                wandb.log({f"val_loss/val_loss_{step}": val_loss})
                 log_plot(activation_stats, step)
                 log_weight_plot(cur_sd, prv_sd, step)
                 for name, param in model.named_parameters():
@@ -307,7 +309,7 @@ def main(
         if master_process and (step + 1) % save_every == 0:
             log = dict(model=raw_model.state_dict(), args=locals())
             os.makedirs(f"logs/{run_id}", exist_ok=True)
-            torch.save(log, f"logs/{run_id}/model_step{step:06d}.pt")
+            # torch.save(log, f"logs/{run_id}/model_step{step:06d}.pt")
 
     # Final logging and cleanup
     timings = timings[-20:]
@@ -319,7 +321,7 @@ def main(
     if master_process:
         log = dict(model=raw_model.state_dict(), args=locals())
         os.makedirs(f"logs/{run_id}", exist_ok=True)
-        torch.save(log, f"logs/{run_id}/final.pt")
+        # torch.save(log, f"logs/{run_id}/final.pt")
         wandb.finish()
 
     destroy_process_group()

@@ -1,4 +1,4 @@
-torchrun --standalone --nproc_per_node=8 run.py \
+torchrun --standalone --nproc_per_node=2 run.py \
     --input_bin "data/fineweb10B/fineweb_train_*.bin" \
     --input_val_bin "data/fineweb10B/fineweb_val_*.bin" \
     --output_dir log_100m \
@@ -10,4 +10,7 @@ torchrun --standalone --nproc_per_node=8 run.py \
     --weight_decay 0.1 \
     --learning_rate 0.001 \
     --warmup_iters 256 \
-    --warmdown_iters 2048
+    --warmdown_iters 2048 \
+    --n_embd 256 \
+    --n_head 4 \
+    --n_layer 8 \

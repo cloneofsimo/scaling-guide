@@ -74,12 +74,12 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        self.c_fc1 = nn.Linear(config.n_embd, config.n_embd * 2, bias=False)
+        self.c_fc2 = nn.Linear(config.n_embd, config.n_embd * 2, bias=False)
+        self.c_proj = nn.Linear(config.n_embd * 2, config.n_embd, bias=False)
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = F.gelu(x)
+        x = F.silu(self.c_fc1(x)) * self.c_fc2(x)
         x = self.c_proj(x)
         return x
 
@@ -129,8 +129,10 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # init wte with emb_std
         self.transformer.wte.weight.data.normal_(mean=0.0, std=config.emb_std)
-        # init lm_head with zeros
-        self.lm_head.weight.data.fill_(0)
+        # init lm_head with std = 1.0 / width
+        self.lm_head.weight.data.normal_(
+            mean=0.0, std=config.base_std * 32 / config.n_embd
+        )
 
         # # init all weights with fan_in / 1024 * base_std
         # for n, p in self.named_parameters():
@@ -163,16 +165,8 @@ class GPT(nn.Module):
 
         return logits, loss
 
-    def configure_classic_optimizers(
-        self, weight_decay, learning_rate, betas, device_type
-    ):
-        optimizer = torch.optim.AdamW(
-            self.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=betas
-        )
-        return optimizer
-
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-        no_decay_name_list = ["bias", "norm"]
+        no_decay_name_list = ["bias", "norm", "wte"]
 
         optimizer_grouped_parameters = []
         final_optimizer_settings = {}
@@ -192,13 +186,13 @@ class GPT(nn.Module):
                     hidden_dim = p.shape[-1]
                     lr_value = learning_rate * (32 / hidden_dim)
                     per_layer_weight_decay_value = (
-                        weight_decay * hidden_dim / 1024
+                        weight_decay * hidden_dim / 4096
                     )  # weight decay 0.1 (SP: 1024)
 
                 # in the case of embedding layer, we use higher lr.
                 if "wte" in n:
-                    lr_value = learning_rate * 0.1
-                    per_layer_weight_decay_value = 0.1
+                    lr_value = learning_rate * 0.3
+                    per_layer_weight_decay_value = 0.0
 
                 group_key = (lr_value, per_layer_weight_decay_value)
                 param_groups[group_key]["params"].append(p)
@@ -214,4 +208,4 @@ class GPT(nn.Module):
         optimizer_grouped_parameters = [v for v in param_groups.values()]
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, betas=betas)
 
-        return optimizer
+        return optimizer, final_optimizer_settings
