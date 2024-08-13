@@ -3,17 +3,18 @@
 # Fixed parameters
 INPUT_BIN="data/fineweb10B/fineweb_train_*.bin"
 INPUT_VAL_BIN="data/fineweb10B/fineweb_val_*.bin"
-BATCH_SIZE=128
+BATCH_SIZE=64
 SEQUENCE_LENGTH=512
-VAL_LOSS_EVERY=512
-NUM_ITERATIONS=10000
-WEIGHT_DECAY=0.0
+VAL_LOSS_EVERY=1024
+NUM_ITERATIONS=10240
+WEIGHT_DECAY=0.1
 WARMUP_ITERS=128
-WARMDOWN_ITERS=128
-N_LAYER=8
+WARMDOWN_ITERS=1024
+N_LAYER=12
 
-LEARNING_RATES=(0.0316 0.01 0.00316 0.001)
-MODEL_WIDTHS=(64 256 512)
+LEARNING_RATES=(0.0316 0.01 0.00316 0.001 0.000316 0.0001)
+#LEARNING_RATES=(0.000316 0.0001)
+MODEL_WIDTHS=(32 128 512)
 
 # Loop over learning rates and model widths
 for width in "${MODEL_WIDTHS[@]}"; do
@@ -44,8 +45,8 @@ for width in "${MODEL_WIDTHS[@]}"; do
             --n_head $n_head \
             --n_layer $N_LAYER \
             --wandb_run_name "lr${lr}_width${width}_2" \
-            --val_max_steps 120 \
-            --wandb_tags "wd0.0" \
+            --val_max_steps 40 \
+            --wandb_tags "std05-weight-init-proj-beta"
 
     done
 done

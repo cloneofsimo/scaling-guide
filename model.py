@@ -77,6 +77,7 @@ class MLP(nn.Module):
         self.c_fc1 = nn.Linear(config.n_embd, config.n_embd * 2, bias=False)
         self.c_fc2 = nn.Linear(config.n_embd, config.n_embd * 2, bias=False)
         self.c_proj = nn.Linear(config.n_embd * 2, config.n_embd, bias=False)
+        # init c_proj with config.base_std / sqrt(config.n_layer)
 
     def forward(self, x):
         x = F.silu(self.c_fc1(x)) * self.c_fc2(x)
@@ -103,7 +104,7 @@ class GPTConfig:
         n_layer=12,
         n_head=12,
         n_embd=768,
-        gpt_linear_init_std=0.02,
+        gpt_linear_init_std=0.5,
         gpt_embed_init_std=0.02,
     ):
         self.vocab_size = vocab_size
@@ -129,18 +130,22 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # init wte with emb_std
         self.transformer.wte.weight.data.normal_(mean=0.0, std=config.emb_std)
-        # init lm_head with std = 1.0 / width
-        self.lm_head.weight.data.normal_(
-            mean=0.0, std=config.base_std * 32 / config.n_embd
-        )
+        # zero init head
+        self.lm_head.weight.data.zero_()
 
-        # # init all weights with fan_in / 1024 * base_std
-        # for n, p in self.named_parameters():
-        #     skip_list = ["wte", "lm_head"]
-        #     if not any([s in n for s in skip_list]):
-        #         fan_in = p.shape[1]
-
-        #         p.data.normal_(mean=0.0, std=config.base_std * (1024 / fan_in) ** 0.5)
+        # init all weights with fan_in / 1024 * base_std
+        for n, p in self.named_parameters():
+            skip_list = ["wte", "lm_head"]
+            if not any([s in n for s in skip_list]):
+                fan_in = p.shape[1]
+                if "c_proj" in n:
+                    p.data.normal_(
+                        mean=0.0,
+                        std=config.base_std
+                        * (config.n_layer * config.n_embd * 2) ** -0.5,
+                    )
+                else:
+                    p.data.normal_(mean=0.0, std=config.base_std * (fan_in) ** -0.5)
 
     def forward(self, idx, targets=None, return_logits=True):
         b, t = idx.size()
@@ -186,7 +191,7 @@ class GPT(nn.Module):
                     hidden_dim = p.shape[-1]
                     lr_value = learning_rate * (32 / hidden_dim)
                     per_layer_weight_decay_value = (
-                        weight_decay * hidden_dim / 4096
+                        weight_decay * hidden_dim / 1024
                     )  # weight decay 0.1 (SP: 1024)
 
                 # in the case of embedding layer, we use higher lr.

@@ -35,12 +35,12 @@ from utils import *
 @click.option("--gradient_clip", default=1.0, help="Gradient clipping threshold")
 @click.option(
     "--gpt_embed_init_std",
-    default=0.02,
+    default=0.5,
     help="GPT embedding layer initialization standard deviation",
 )
 @click.option(
     "--gpt_linear_init_std",
-    default=0.02,
+    default=0.5,
     help="GPT linear layer initialization standard deviation",
 )
 @click.option(
@@ -187,18 +187,18 @@ def main(
     raw_model = model.module
 
     # Initialize optimizer
-    batch_ratio_16M = (
+    batch_ratio_4M = (
         B * T * gradient_accumulation_steps * ddp_world_size
-    ) / 1.6e7  # effective batch size relative to 16M which people use a lot.
+    ) / 5e5  # effective batch size relative to 16M which people use a lot.
 
     print0(
-        f"batch_ratio_16M: {batch_ratio_16M}, your betas will be {(1 - batch_ratio_16M * (1 - 0.9), 1 - batch_ratio_16M * (1 - 0.95))}"
+        f"batch_ratio_4M: {batch_ratio_4M}, your betas will be {(1 - batch_ratio_4M * (1 - 0.9), 1 - batch_ratio_4M * (1 - 0.95))}"
     )
 
     optimizer, optimizer_settings = raw_model.configure_optimizers(
         weight_decay=weight_decay,
         learning_rate=learning_rate,
-        betas=(1 - batch_ratio_16M * (1 - 0.9), 1 - batch_ratio_16M * (1 - 0.95)),
+        betas=(1 - batch_ratio_4M * (1 - 0.9), 1 - batch_ratio_4M * (1 - 0.95)),
         device_type=device,
     )
 
@@ -257,12 +257,26 @@ def main(
                 dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
                 val_loss /= val_max_steps
             print0(f"val loss {val_loss}")
+
+            do_continue = torch.tensor([0], device=device)
             if master_process:
                 wandb.log({f"val_loss/val_loss_{step}": val_loss})
                 log_plot(activation_stats, step)
+                # if there are activations with > 1e6 elements, exit.
+                if any([(a[0].max().item()) > 1e6 for a in activation_stats.values()]):
+                    print0("Exiting due to large activation size")
+                    wandb.finish()
+                    do_continue = torch.tensor([1], device=device)
+                    # send a signal to other processes to exit
+
                 log_weight_plot(cur_sd, prv_sd, step)
                 for name, param in model.named_parameters():
                     prv_sd[name] = param.data.clone().cpu()
+
+            # dummy dumb dumb trick... probably not the best way to do this
+            dist.all_reduce(do_continue, op=dist.ReduceOp.SUM)
+            if do_continue.item() > 0:
+                break
 
         # Training
         model.train()
